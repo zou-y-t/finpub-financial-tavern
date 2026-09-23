@@ -25,6 +25,9 @@ function firstVisiblePrice(market: ReturnType<typeof configuredMarket>, symbol: 
   assert.equal(market.tick, 0);
   assert.equal(market.snapshots.length, INSTRUMENTS.length * 10, 'tick 0 must contain top-five rows for both sides');
   assert.equal(market.participantSnapshots.length, 21, 'tick 0 must include player plus all NPCs');
+  assert.equal(market.portfolioSnapshots.length, 1, 'tick 0 must include a player portfolio baseline');
+  const initialWeights = market.portfolioSnapshots[0];
+  assert.ok(Math.abs(initialWeights.cashWeight + Object.values(initialWeights.positionWeights).reduce((total, weight) => total + weight, 0) - 1) < 0.000001, 'portfolio weights must sum to 100%');
   assert.ok(Object.values(market.books).every((book) => book.bids.length > 0 && book.asks.length > 0), 'bootstrap liquidity should be confirmed');
 }
 
@@ -139,6 +142,7 @@ function firstVisiblePrice(market: ReturnType<typeof configuredMarket>, symbol: 
   assert.ok(left.events.length >= 1, 'events should occur on the deterministic schedule');
   assert.equal(left.snapshots.length, (left.tick + 1) * INSTRUMENTS.length * 10);
   assert.equal(left.participantSnapshots.length, (left.tick + 1) * 21);
+  assert.equal(left.portfolioSnapshots.length, left.tick + 1, 'one portfolio snapshot must be captured per tick');
   assert.ok(left.accounts.player.cash >= 0);
   assert.ok(INSTRUMENTS.every((item) => left.accounts.player.positions[item.symbol].quantity >= 0));
   for (const symbol of INSTRUMENTS.map((item) => item.symbol)) {
@@ -159,6 +163,7 @@ function firstVisiblePrice(market: ReturnType<typeof configuredMarket>, symbol: 
   assert.equal(market.events.length, 0);
   assert.equal(market.snapshots.length, INSTRUMENTS.length * 10, 'cleanup must retain a current baseline book snapshot');
   assert.equal(market.participantSnapshots.length, 21, 'cleanup must retain current participant baseline');
+  assert.equal(market.portfolioSnapshots.length, 1, 'cleanup must retain the current portfolio baseline');
   assert.equal(market.accounts.player.cash, cashBefore, 'cleanup must not mutate account balances');
   assert.deepEqual(Object.keys(market.orders).sort(), openOrderIds.sort(), 'cleanup must preserve every active order');
   assert.ok(INSTRUMENTS.every((item) => market.assets[item.symbol].priceHistory.length === 0));

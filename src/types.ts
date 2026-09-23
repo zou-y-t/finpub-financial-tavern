@@ -125,6 +125,14 @@ export interface ParticipantSnapshot {
   netPosition: number;
 }
 
+export interface PlayerPortfolioSnapshot {
+  simTime: string;
+  tick: number;
+  totalAsset: number;
+  cashWeight: number;
+  positionWeights: Record<string, number>;
+}
+
 export interface MarketEvent {
   id: string;
   tick: number;
@@ -177,6 +185,7 @@ export interface Market {
   trades: Trade[];
   snapshots: BookSnapshot[];
   participantSnapshots: ParticipantSnapshot[];
+  portfolioSnapshots: PlayerPortfolioSnapshot[];
   events: MarketEvent[];
   latestEvent?: MarketEvent;
   nextEventTick: number;

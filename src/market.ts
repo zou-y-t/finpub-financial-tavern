@@ -1,6 +1,6 @@
 import type {
   Account, AssetState, Book, BookLevel, BookSnapshot, InstrumentDefinition, Market,
-  MarketConfig, MarketEvent, NpcProfile, Order, ParticipantSnapshot, Position, Side,
+  MarketConfig, MarketEvent, NpcProfile, Order, ParticipantSnapshot, PlayerPortfolioSnapshot, Position, Side,
   Trade, TraderStyle,
 } from './types.ts';
 
@@ -119,7 +119,7 @@ export function createMarket(rawConfig: MarketConfig): Market {
     config, tick: 0, sequence: 0, tradeSequence: 0,
     simStartMs: Number.isFinite(start) ? start : Date.now(),
     assets: {}, books: {}, accounts: {}, npcProfiles: {}, orders: {},
-    pendingOrderIds: [], pendingCancelIds: [], trades: [], snapshots: [], participantSnapshots: [],
+    pendingOrderIds: [], pendingCancelIds: [], trades: [], snapshots: [], participantSnapshots: [], portfolioSnapshots: [],
     events: [], nextEventTick: EVENT_GAP_MIN, rngState: config.seed, notices: [],
   };
   for (const item of INSTRUMENTS) {
@@ -139,6 +139,7 @@ export function createMarket(rawConfig: MarketConfig): Market {
   bootstrapLiquidity(market);
   captureSnapshots(market);
   captureParticipantSnapshots(market);
+  capturePlayerPortfolioSnapshot(market);
   return market;
 }
 
@@ -604,6 +605,24 @@ function captureParticipantSnapshots(market: Market): void {
   }
 }
 
+function capturePlayerPortfolioSnapshot(market: Market): void {
+  const player = market.accounts.player;
+  const metrics = accountMetrics(market, player);
+  const denominator = metrics.totalAsset;
+  const positionWeights = Object.fromEntries(INSTRUMENTS.map((instrument) => {
+    const positionValue = player.positions[instrument.symbol].quantity * market.assets[instrument.symbol].lastPrice;
+    return [instrument.symbol, denominator > 0 ? positionValue / denominator : 0];
+  }));
+  const snapshot: PlayerPortfolioSnapshot = {
+    simTime: simTime(market),
+    tick: market.tick,
+    totalAsset: metrics.totalAsset,
+    cashWeight: denominator > 0 ? player.cash / denominator : 0,
+    positionWeights,
+  };
+  market.portfolioSnapshots.push(snapshot);
+}
+
 export function advanceTick(market: Market): Market {
   market.tick += 1;
   market.notices = [];
@@ -616,12 +635,13 @@ export function advanceTick(market: Market): Market {
   for (const order of incoming) processIncomingOrder(market, order);
   captureSnapshots(market);
   captureParticipantSnapshots(market);
+  capturePlayerPortfolioSnapshot(market);
   return market;
 }
 
 export function clearAccumulatedData(market: Market): { recordsRemoved: number; ordersRemoved: number } {
   const chartPoints = Object.values(market.assets).reduce((total, asset) => total + asset.priceHistory.length, 0);
-  const recordsRemoved = market.trades.length + market.snapshots.length + market.participantSnapshots.length + market.events.length + chartPoints;
+  const recordsRemoved = market.trades.length + market.snapshots.length + market.participantSnapshots.length + market.portfolioSnapshots.length + market.events.length + chartPoints;
   const beforeOrders = Object.keys(market.orders).length;
   const activeStatuses = new Set(['queued', 'open', 'partial', 'pending_cancel']);
   market.orders = Object.fromEntries(Object.entries(market.orders).filter(([, order]) => activeStatuses.has(order.status)));
@@ -629,11 +649,13 @@ export function clearAccumulatedData(market: Market): { recordsRemoved: number; 
   market.trades = [];
   market.snapshots = [];
   market.participantSnapshots = [];
+  market.portfolioSnapshots = [];
   market.events = [];
   market.latestEvent = undefined;
   for (const asset of Object.values(market.assets)) asset.priceHistory = [];
   captureSnapshots(market);
   captureParticipantSnapshots(market);
+  capturePlayerPortfolioSnapshot(market);
   market.notices = [`Cleared ${recordsRemoved.toLocaleString()} cached history records and ${ordersRemoved.toLocaleString()} completed orders at tick ${market.tick}.`];
   return { recordsRemoved, ordersRemoved };
 }
