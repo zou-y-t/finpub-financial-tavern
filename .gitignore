@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.npm-cache/
+*.tsbuildinfo
+.finpub-dev.pid
+work/runtime/
+work/github-upload/
+work/tools/

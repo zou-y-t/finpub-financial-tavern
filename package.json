@@ -1,0 +1,24 @@
+{
+  "name": "finpub-financial-tavern",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --configLoader native",
+    "build": "tsc -b && vite build --configLoader native",
+    "preview": "vite preview --configLoader native",
+    "test": "node --experimental-strip-types src/market.test.ts"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "vite": "latest",
+    "typescript": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@types/node": "latest"
+  }
+}
