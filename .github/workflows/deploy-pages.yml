@@ -28,6 +28,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Build site
+        env:
+          FINPUB_DEPLOY_TARGET: github-pages
         run: npm run build
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5

@@ -3,6 +3,7 @@ import {
   INSTRUMENTS, advanceTick, clearAccumulatedData, createMarket, defaultConfig, estimateMarketOrder, getBookLevels,
   getQuotes, queuePlayerOrder, requestCancel, roundCurrency,
 } from './market.ts';
+import { buildStrategyContext, createStrategySession, expandStrategyIntents, normalizeStrategyIntents, validateStrategyAction } from './strategy.ts';
 
 function configuredMarket() {
   const config = defaultConfig();
@@ -29,6 +30,36 @@ function firstVisiblePrice(market: ReturnType<typeof configuredMarket>, symbol: 
   const initialWeights = market.portfolioSnapshots[0];
   assert.ok(Math.abs(initialWeights.cashWeight + Object.values(initialWeights.positionWeights).reduce((total, weight) => total + weight, 0) - 1) < 0.000001, 'portfolio weights must sum to 100%');
   assert.ok(Object.values(market.books).every((book) => book.bids.length > 0 && book.asks.length > 0), 'bootstrap liquidity should be confirmed');
+}
+
+{
+  const market = configuredMarket();
+  for (let tick = 0; tick < 5; tick += 1) advanceTick(market);
+  const context = buildStrategyContext(market, createStrategySession());
+  assert.equal(context.tick, 5);
+  assert.equal(Object.keys(context.assets).length, INSTRUMENTS.length);
+  assert.ok(context.assets.BDX.model.up_probability >= 0 && context.assets.BDX.model.up_probability <= 1);
+  assert.equal(context.account.available_cash, context.account.cash - context.account.frozen_cash);
+  assert.deepEqual(context.open_orders, [], 'a fresh strategy context should expose the player open-order collection');
+  const ask = firstVisiblePrice(market, 'BDX', 'sell');
+  assert.equal(queuePlayerOrder(market, { symbol: 'BDX', side: 'buy', type: 'limit', quantity: 1, limitPrice: ask }).ok, true);
+  const withOrder = buildStrategyContext(market, createStrategySession());
+  assert.equal(withOrder.open_orders.length, 1);
+  assert.equal(withOrder.open_orders[0].reserved_cash > 0, true);
+  assert.equal(withOrder.assets.BDX.position.available, market.accounts.player.positions.BDX.quantity - market.accounts.player.positions.BDX.reserved);
+  const normalized = normalizeStrategyIntents([{ side: 'buy', symbol: 'BDX', quantity: 1, price: ask }]);
+  assert.equal(normalized.error, undefined);
+  assert.equal(normalized.intents[0].action, 'order');
+  if (normalized.intents[0].action === 'order') assert.equal(validateStrategyAction(market, normalized.intents[0]), undefined);
+  assert.ok(normalizeStrategyIntents([{ side: 'buy', symbol: 'BDX', quantity: 26, price: ask }]).error);
+  const marketOrder = normalizeStrategyIntents([{ action: 'order', side: 'buy', symbol: 'BDX', quantity: 1, type: 'market' }]);
+  assert.equal(marketOrder.error, undefined);
+  assert.equal(marketOrder.intents[0].action, 'order');
+  if (marketOrder.intents[0].action === 'order') assert.equal(validateStrategyAction(market, marketOrder.intents[0]), undefined);
+  const cancellations = expandStrategyIntents(market, normalizeStrategyIntents([{ action: 'cancel_all', symbol: 'BDX', side: 'buy' }]).intents);
+  assert.equal(cancellations.length, 1);
+  assert.equal(cancellations[0].action, 'cancel');
+  assert.equal(validateStrategyAction(market, cancellations[0]), undefined);
 }
 
 {

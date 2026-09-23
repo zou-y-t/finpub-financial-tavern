@@ -1,4 +1,5 @@
 import type { Market } from './types';
+import type { StrategySession } from './strategy';
 
 function escapeCsv(value: string | number | null | undefined): string {
   const text = value === null || value === undefined ? '' : String(value);
@@ -19,7 +20,7 @@ function download(filename: string, content: string): void {
   URL.revokeObjectURL(url);
 }
 
-export function exportMarketData(market: Market): void {
+export function exportMarketData(market: Market, strategy?: StrategySession): void {
   const tradesColumns = [
     'sim_time', 'tick', 'trade_id', 'symbol', 'price', 'quantity', 'aggressor_side', 'buyer_id', 'seller_id',
     'maker_order_id', 'taker_order_id', 'maker_id', 'taker_id', 'maker_side', 'taker_side', 'maker_fee', 'taker_fee',
@@ -50,5 +51,43 @@ export function exportMarketData(market: Market): void {
     realized_pnl: row.realizedPnl, unrealized_pnl: row.unrealizedPnl, total_pnl: row.totalPnl,
     maker_fee_total: row.makerFeeTotal, taker_fee_total: row.takerFeeTotal, total_fee: row.totalFee,
     trade_count: row.tradeCount, net_position: row.netPosition,
+  }))));
+
+  if (!strategy) return;
+  const barsColumns = [
+    'sim_time', 'tick', 'bar_index', 'symbol', 'open', 'high', 'low', 'close', 'volume',
+    'best_bid', 'best_ask', 'mid', 'spread', 'bid_quantity', 'ask_quantity', 'fair_value', 'fair_value_gap',
+    'momentum_1', 'momentum_5', 'book_imbalance', 'spread_bps', 'event_signal', 'up_probability', 'expected_return',
+    'position_quantity', 'available_quantity', 'reserved_quantity', 'average_cost', 'account_cash', 'account_available_cash',
+    'account_frozen_cash', 'account_total_asset', 'account_position_value', 'account_unrealized_pnl', 'event_tick',
+    'event_direction', 'event_symbols', 'event_impact', 'event_permanent_share',
+    'open_orders_json',
+  ];
+  download('strategy_bars.csv', createCsv(barsColumns, strategy.bars.map((bar) => ({
+    sim_time: bar.simTime, tick: bar.tick, bar_index: bar.barIndex, symbol: bar.symbol, open: bar.open, high: bar.high,
+    low: bar.low, close: bar.close, volume: bar.volume, best_bid: bar.bestBid, best_ask: bar.bestAsk, mid: bar.mid,
+    spread: bar.spread, bid_quantity: bar.bidQuantity, ask_quantity: bar.askQuantity, fair_value: bar.fairValue,
+    fair_value_gap: bar.fairValueGap, momentum_1: bar.momentum1, momentum_5: bar.momentum5,
+    book_imbalance: bar.bookImbalance, spread_bps: bar.spreadBps, event_signal: bar.eventSignal,
+    up_probability: bar.upProbability, expected_return: bar.expectedReturn, position_quantity: bar.positionQuantity,
+    available_quantity: bar.availableQuantity, reserved_quantity: bar.reservedQuantity, average_cost: bar.averageCost,
+    account_cash: bar.accountCash, account_available_cash: bar.accountAvailableCash, account_frozen_cash: bar.accountFrozenCash,
+    account_total_asset: bar.accountTotalAsset, account_position_value: bar.accountPositionValue,
+    account_unrealized_pnl: bar.accountUnrealizedPnl, event_tick: bar.eventTick, event_direction: bar.eventDirection,
+    event_symbols: bar.eventSymbols, event_impact: bar.eventImpact, event_permanent_share: bar.eventPermanentShare,
+    open_orders_json: bar.openOrdersJson,
+  }))));
+
+  const runsColumns = ['sim_time', 'tick', 'bar_index', 'model_version', 'status', 'duration_ms', 'order_count', 'message', 'intents_json'];
+  download('strategy_runs.csv', createCsv(runsColumns, strategy.runs.map((run) => ({
+    sim_time: run.simTime, tick: run.tick, bar_index: run.barIndex, model_version: run.modelVersion, status: run.status,
+    duration_ms: run.durationMs, order_count: run.orderCount, message: run.message, intents_json: run.intentsJson,
+  }))));
+
+  const ordersColumns = ['sim_time', 'tick', 'bar_index', 'mode', 'action', 'order_type', 'side', 'symbol', 'quantity', 'price', 'order_id', 'message'];
+  download('strategy_orders.csv', createCsv(ordersColumns, strategy.orders.map((order) => ({
+    sim_time: order.simTime, tick: order.tick, bar_index: order.barIndex, mode: order.mode, action: order.action,
+    order_type: order.orderType, side: order.side, symbol: order.symbol, quantity: order.quantity, price: order.price,
+    order_id: order.orderId, message: order.message,
   }))));
 }
