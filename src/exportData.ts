@@ -61,7 +61,8 @@ export function exportMarketData(market: Market, strategy?: StrategySession): vo
     'position_quantity', 'available_quantity', 'reserved_quantity', 'average_cost', 'account_cash', 'account_available_cash',
     'account_frozen_cash', 'account_total_asset', 'account_position_value', 'account_unrealized_pnl', 'event_tick',
     'event_direction', 'event_symbols', 'event_impact', 'event_permanent_share',
-    'open_orders_json',
+    'aggressive_buy_volume_5', 'aggressive_sell_volume_5', 'aggressive_buy_volume_20', 'aggressive_sell_volume_20',
+    'aggressive_buy_volume_50', 'aggressive_sell_volume_50', 'orderbook_history_json', 'open_orders_json',
   ];
   download('strategy_bars.csv', createCsv(barsColumns, strategy.bars.map((bar) => ({
     sim_time: bar.simTime, tick: bar.tick, bar_index: bar.barIndex, symbol: bar.symbol, open: bar.open, high: bar.high,
@@ -75,6 +76,10 @@ export function exportMarketData(market: Market, strategy?: StrategySession): vo
     account_total_asset: bar.accountTotalAsset, account_position_value: bar.accountPositionValue,
     account_unrealized_pnl: bar.accountUnrealizedPnl, event_tick: bar.eventTick, event_direction: bar.eventDirection,
     event_symbols: bar.eventSymbols, event_impact: bar.eventImpact, event_permanent_share: bar.eventPermanentShare,
+    aggressive_buy_volume_5: bar.aggressiveBuyVolume5, aggressive_sell_volume_5: bar.aggressiveSellVolume5,
+    aggressive_buy_volume_20: bar.aggressiveBuyVolume20, aggressive_sell_volume_20: bar.aggressiveSellVolume20,
+    aggressive_buy_volume_50: bar.aggressiveBuyVolume50, aggressive_sell_volume_50: bar.aggressiveSellVolume50,
+    orderbook_history_json: bar.orderbookHistoryJson,
     open_orders_json: bar.openOrdersJson,
   }))));
 

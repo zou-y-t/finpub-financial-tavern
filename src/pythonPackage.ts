@@ -82,6 +82,8 @@ Change ticks in replay_config.json to choose the number of auction ticks. The ru
 Reproducibility rule: start a fresh browser market with the exported initial configuration, use the same strategy.py from tick 0, set the same Dry run / live mode, and advance to the same tick count. The browser and this package then use the same seed, event schedule, NPC decisions, order sequencing, visible-top-five validation, and matching order. Manual browser orders or editing/enabling a strategy partway through a session are intentionally not replayed by this package; express those actions inside on_bar(ctx) for a fully portable replay.
 
 Only edit strategy.py. It must define on_bar(ctx) and return a list of actions. buy(symbol, quantity, price) and sell(symbol, quantity, price) create limit orders; omit price for a market order. cancel(order_id) requests one cancellation, and cancel_all(symbol=None, side=None) requests all matching active cancellations. A bar allows up to six actions, including at most three orders of 25 units each. A bar runs after every five auction ticks. In dry_run mode actions are validated and recorded but do not change the book.
+
+For every asset, ctx exposes live top-five levels, exact active-order FIFO queue metrics, and orderbook_history: the last 50 completed auction ticks with bid/ask price-volume levels and per-tick aggressive buy/sell flow. The Python replay uses the same context shape as the browser.
 `;
 
 const pythonRunner = String.raw`import csv
@@ -295,7 +297,7 @@ def create_market(raw, sim_start_ms):
     config["seed"] = max(1, math.floor(config["seed"]) or 1)
     config["makerFeeRate"] = max(0, config["makerFeeRate"])
     config["takerFeeRate"] = max(0, config["takerFeeRate"])
-    market = {"config": config, "sim_start_ms": sim_start_ms, "tick": 0, "sequence": 0, "trade_sequence": 0, "rng": config["seed"], "assets": {}, "books": {}, "accounts": {}, "profiles": {}, "orders": {}, "pending": [], "pending_cancel": [], "trades": [], "events": [], "latest_event": None, "next_event_tick": 15, "portfolio": []}
+    market = {"config": config, "sim_start_ms": sim_start_ms, "tick": 0, "sequence": 0, "trade_sequence": 0, "rng": config["seed"], "assets": {}, "books": {}, "accounts": {}, "profiles": {}, "orders": {}, "pending": [], "pending_cancel": [], "trades": [], "events": [], "latest_event": None, "next_event_tick": 15, "portfolio": [], "orderbook_history": []}
     for item in INSTRUMENTS:
         symbol, tick = item["symbol"], item["tickSize"]
         price = round_price(max(tick, config["initialPrices"].get(symbol, item["initialPrice"])), tick)
@@ -307,6 +309,7 @@ def create_market(raw, sim_start_ms):
         market["profiles"][profile["id"]] = profile
         market["accounts"][profile["id"]] = account(profile["id"], "npc", config, profile)
     bootstrap_liquidity(market)
+    capture_orderbooks(market)
     capture_portfolio(market)
     market["summary"] = lambda: summary(market)
     return market
@@ -611,6 +614,56 @@ def capture_portfolio(market):
         symbol = item["symbol"]
         row[f"weight_{symbol}"] = player["positions"][symbol]["quantity"] * market["assets"][symbol]["lastPrice"] / total if total else 0
     market["portfolio"].append(row)
+
+def padded_levels(market, symbol, side):
+    values = levels(market, symbol, side)
+    return [{"level": index + 1, "price": values[index]["price"] if index < len(values) else None, "volume": values[index]["quantity"] if index < len(values) else 0} for index in range(5)]
+
+def live_levels(market, symbol, side):
+    raw, result = market["books"][symbol]["bids" if side == "buy" else "asks"], []
+    for order in raw:
+        current = next((row for row in result if row["price"] == order["limitPrice"]), None)
+        if not current:
+            if len(result) >= 5: continue
+            current = {"level": len(result) + 1, "price": order["limitPrice"], "volume": 0, "order_count": 0, "oldest_order_age_ticks": None, "newest_order_age_ticks": None, "_total_age": 0}
+            result.append(current)
+        age = max(0, market["tick"] - order["submittedTick"])
+        current["volume"] += order["remaining"]
+        current["order_count"] += 1
+        current["_total_age"] += age
+        current["oldest_order_age_ticks"] = max(current["oldest_order_age_ticks"] if current["oldest_order_age_ticks"] is not None else age, age)
+        current["newest_order_age_ticks"] = min(current["newest_order_age_ticks"] if current["newest_order_age_ticks"] is not None else age, age)
+    for row in result:
+        row["average_order_age_ticks"] = round(row.pop("_total_age") / row["order_count"], 3)
+    while len(result) < 5:
+        result.append({"level": len(result) + 1, "price": None, "volume": 0, "order_count": 0, "oldest_order_age_ticks": None, "newest_order_age_ticks": None, "average_order_age_ticks": None})
+    return result
+
+def queue_metrics(market, order):
+    unavailable = {"queue_ahead_volume": None, "queue_ahead_order_count": None, "queue_rank": None, "level_total_volume": None, "level_total_order_count": None}
+    if order["type"] != "limit" or order["status"] not in ("open", "partial") or order["limitPrice"] is None: return unavailable
+    raw = market["books"][order["symbol"]]["bids" if order["side"] == "buy" else "asks"]
+    same_price = [candidate for candidate in raw if candidate["limitPrice"] == order["limitPrice"]]
+    index = next((index for index, candidate in enumerate(same_price) if candidate["id"] == order["id"]), -1)
+    if index < 0: return unavailable
+    ahead = same_price[:index]
+    return {"queue_ahead_volume": sum(candidate["remaining"] for candidate in ahead), "queue_ahead_order_count": len(ahead), "queue_rank": index + 1, "level_total_volume": sum(candidate["remaining"] for candidate in same_price), "level_total_order_count": len(same_price)}
+
+def capture_orderbooks(market):
+    for item in INSTRUMENTS:
+        symbol = item["symbol"]
+        buys = [trade for trade in market["trades"] if trade["tick"] == market["tick"] and trade["symbol"] == symbol and trade["aggressorSide"] == "buy"]
+        sells = [trade for trade in market["trades"] if trade["tick"] == market["tick"] and trade["symbol"] == symbol and trade["aggressorSide"] == "sell"]
+        market["orderbook_history"].append({"sim_time": sim_time(market), "tick": market["tick"], "symbol": symbol, "bids": padded_levels(market, symbol, "buy"), "asks": padded_levels(market, symbol, "sell"), "aggressive_buy_volume": sum(trade["quantity"] for trade in buys), "aggressive_sell_volume": sum(trade["quantity"] for trade in sells), "aggressive_buy_trades": len(buys), "aggressive_sell_trades": len(sells)})
+
+def recent_orderbook_history(market, symbol):
+    return [row for row in market["orderbook_history"] if row["symbol"] == symbol][-50:]
+
+def order_flow(history, ticks):
+    result = {"aggressive_buy_volume": 0, "aggressive_sell_volume": 0, "aggressive_buy_trades": 0, "aggressive_sell_trades": 0}
+    for row in history[-ticks:]:
+        for key in result: result[key] += row[key]
+    return result
 `, String.raw`
 def advance_tick(market):
     market["tick"] += 1
@@ -627,12 +680,16 @@ def advance_tick(market):
     incoming = sorted((market["orders"][identifier] for identifier in market["pending"] if identifier in market["orders"]), key=lambda order: order["sequence"])
     market["pending"] = []
     for order in incoming: process_order(market, order)
+    capture_orderbooks(market)
     capture_portfolio(market)
 
 def build_context(market, session):
     player, data, event = market["accounts"]["player"], metrics(market, market["accounts"]["player"]), market["latest_event"]
     assets, index = {}, market["tick"] // BAR_TICKS
-    open_orders = [{"id": order["id"], "symbol": order["symbol"], "side": order["side"], "type": order["type"], "price": order["limitPrice"], "quantity": order["quantity"], "remaining": order["remaining"], "status": order["status"], "submitted_tick": order["submittedTick"], "reserved_cash": order["reservedCash"], "reserved_quantity": order["reservedQuantity"]} for order in sorted(market["orders"].values(), key=lambda row: row["sequence"]) if order["participantId"] == "player" and order["status"] in ("queued", "open", "partial", "pending_cancel")]
+    open_orders = []
+    for order in sorted(market["orders"].values(), key=lambda row: row["sequence"]):
+        if order["participantId"] != "player" or order["status"] not in ("queued", "open", "partial", "pending_cancel"): continue
+        open_orders.append({"id": order["id"], "symbol": order["symbol"], "side": order["side"], "type": order["type"], "price": order["limitPrice"], "quantity": order["quantity"], "remaining": order["remaining"], "status": order["status"], "submitted_tick": order["submittedTick"], "reserved_cash": order["reservedCash"], "reserved_quantity": order["reservedQuantity"], "order_age_ticks": max(0, market["tick"] - order["submittedTick"]), **queue_metrics(market, order)})
     for item in INSTRUMENTS:
         symbol, asset = item["symbol"], market["assets"][item["symbol"]]
         recent = [point["price"] for point in asset["priceHistory"] if point["tick"] > market["tick"] - BAR_TICKS] or [asset["lastPrice"]]
@@ -648,11 +705,14 @@ def build_context(market, session):
         expected = round(0.45 * m1 + 0.7 * m5 + 0.85 * gap + 0.42 * imbalance + 0.55 * news - 0.03 * spread_bps / 100, 6)
         probability = round(1 / (1 + math.exp(-max(-12, min(12, expected * 18)))), 6)
         position = player["positions"][symbol]
-        snapshot = {"sim_time": sim_time(market), "tick": market["tick"], "bar_index": index, "symbol": symbol, "open": recent[0], "high": max(recent), "low": min(recent), "close": asset["lastPrice"], "volume": asset["volume"] - session["last_volume"].get(symbol, 0), "best_bid": quote["bestBid"], "best_ask": quote["bestAsk"], "mid": quote["mid"], "spread": quote["spread"], "bid_quantity": bq, "ask_quantity": aq, "fair_value": asset["fairValue"], "fair_value_gap": gap, "momentum_1": m1, "momentum_5": m5, "book_imbalance": imbalance, "spread_bps": spread_bps, "event_signal": news, "up_probability": probability, "expected_return": expected, "position_quantity": position["quantity"], "available_quantity": position["quantity"] - position["reserved"], "reserved_quantity": position["reserved"], "average_cost": position["averageCost"], "account_cash": player["cash"], "account_available_cash": player["cash"] - player["reservedCash"], "account_frozen_cash": player["reservedCash"], "account_total_asset": data["totalAsset"], "account_position_value": data["positionValue"], "account_unrealized_pnl": data["unrealized"], "event_tick": event["tick"] if event else None, "event_direction": event["direction"] if event else None, "event_symbols": "|".join(event["symbols"]) if event else "", "event_impact": event["impact"] if event else None, "event_permanent_share": event["permanentShare"] if event else None, "open_orders_json": json.dumps(open_orders, separators=(",", ":"))}
+        history = [{key: value for key, value in row.items() if key != "symbol"} for row in recent_orderbook_history(market, symbol)]
+        flow5, flow20, flow50 = order_flow(history, 5), order_flow(history, 20), order_flow(history, 50)
+        live_bids, live_asks = live_levels(market, symbol, "buy"), live_levels(market, symbol, "sell")
+        snapshot = {"sim_time": sim_time(market), "tick": market["tick"], "bar_index": index, "symbol": symbol, "open": recent[0], "high": max(recent), "low": min(recent), "close": asset["lastPrice"], "volume": asset["volume"] - session["last_volume"].get(symbol, 0), "best_bid": quote["bestBid"], "best_ask": quote["bestAsk"], "mid": quote["mid"], "spread": quote["spread"], "bid_quantity": bq, "ask_quantity": aq, "fair_value": asset["fairValue"], "fair_value_gap": gap, "momentum_1": m1, "momentum_5": m5, "book_imbalance": imbalance, "spread_bps": spread_bps, "event_signal": news, "up_probability": probability, "expected_return": expected, "position_quantity": position["quantity"], "available_quantity": position["quantity"] - position["reserved"], "reserved_quantity": position["reserved"], "average_cost": position["averageCost"], "account_cash": player["cash"], "account_available_cash": player["cash"] - player["reservedCash"], "account_frozen_cash": player["reservedCash"], "account_total_asset": data["totalAsset"], "account_position_value": data["positionValue"], "account_unrealized_pnl": data["unrealized"], "event_tick": event["tick"] if event else None, "event_direction": event["direction"] if event else None, "event_symbols": "|".join(event["symbols"]) if event else "", "event_impact": event["impact"] if event else None, "event_permanent_share": event["permanentShare"] if event else None, "aggressive_buy_volume_5": flow5["aggressive_buy_volume"], "aggressive_sell_volume_5": flow5["aggressive_sell_volume"], "aggressive_buy_volume_20": flow20["aggressive_buy_volume"], "aggressive_sell_volume_20": flow20["aggressive_sell_volume"], "aggressive_buy_volume_50": flow50["aggressive_buy_volume"], "aggressive_sell_volume_50": flow50["aggressive_sell_volume"], "orderbook_history_json": json.dumps(history, separators=(",", ":")), "open_orders_json": json.dumps(open_orders, separators=(",", ":"))}
         session["last_volume"][symbol] = asset["volume"]
         session["bars"].append(snapshot)
         prior_bars = [{key: bar[key] for key in ("tick", "open", "high", "low", "close", "volume")} for bar in session["bars"] if bar["symbol"] == symbol][-60:]
-        assets[symbol] = {"bars": prior_bars, "bar": prior_bars[-1], "book": {"best_bid": quote["bestBid"], "best_ask": quote["bestAsk"], "mid": quote["mid"], "spread": quote["spread"], "bid_quantity": bq, "ask_quantity": aq}, "fair_value": asset["fairValue"], "position": {"quantity": position["quantity"], "available": position["quantity"] - position["reserved"], "reserved": position["reserved"], "average_cost": position["averageCost"]}, "model": {"version": "signal_v1", "up_probability": probability, "expected_return": expected, "momentum_1": m1, "momentum_5": m5, "fair_value_gap": gap, "book_imbalance": imbalance, "spread_bps": spread_bps, "event_signal": news}}
+        assets[symbol] = {"bars": prior_bars, "bar": prior_bars[-1], "book": {"best_bid": quote["bestBid"], "best_ask": quote["bestAsk"], "mid": quote["mid"], "spread": quote["spread"], "bid_quantity": bq, "ask_quantity": aq, "bids": live_bids, "asks": live_asks}, "order_flow": {"last_5_ticks": flow5, "last_20_ticks": flow20, "last_50_ticks": flow50}, "orderbook_history": history, "fair_value": asset["fairValue"], "position": {"quantity": position["quantity"], "available": position["quantity"] - position["reserved"], "reserved": position["reserved"], "average_cost": position["averageCost"]}, "model": {"version": "signal_v1", "up_probability": probability, "expected_return": expected, "momentum_1": m1, "momentum_5": m5, "fair_value_gap": gap, "book_imbalance": imbalance, "spread_bps": spread_bps, "event_signal": news}}
     return {"tick": market["tick"], "sim_time": sim_time(market), "bar_index": index, "bar_ticks": BAR_TICKS, "model_version": "signal_v1", "account": {"cash": player["cash"], "available_cash": player["cash"] - player["reservedCash"], "frozen_cash": player["reservedCash"], "total_asset": data["totalAsset"], "position_value": data["positionValue"], "unrealized_pnl": data["unrealized"]}, "open_orders": open_orders, "event": {"tick": event["tick"], "direction": event["direction"], "symbols": event["symbols"], "impact": event["impact"], "permanent_share": event["permanentShare"]} if event else None, "assets": assets}
 
 def summary(market):

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { exportMarketData } from './exportData';
 import { downloadStrategyPackage } from './pythonPackage';
 import { WikiPage } from './Wiki';
@@ -25,7 +26,7 @@ const copy = {
     account: 'Your account', totalCash: 'Total cash', availableCash: 'Available cash', frozenCash: 'Frozen cash',
     holdings: 'Holdings value', assets: 'Total assets', realized: 'Realized P&L', unrealized: 'Unrealized P&L',
     feesPaid: 'Total fees', orderBook: 'Order book · top 5', trades: 'Trades', orders: 'My orders', positions: 'My positions',
-    portfolio: 'Portfolio history', strategy: 'Automated strategy', accelerate: 'Fast-forward ×25', events: 'Event timeline', npcs: 'NPC statistics', selected: 'Selected', last: 'Last', change: 'Change', volume: 'Volume', clearCache: 'Clear cache',
+    portfolio: 'Portfolio history', strategy: 'Automated strategy', accelerate: 'Advance', speed: 'Speed', events: 'Event timeline', npcs: 'NPC statistics', selected: 'Selected', last: 'Last', change: 'Change', volume: 'Volume', clearCache: 'Clear cache',
   },
   zh: {
     start: '启动市场', reset: '恢复默认', setup: '市场初始化', fees: '费用与账户设置', cash: '玩家初始现金', inventory: '每种酒初始持仓', prices: '初始市场价格',
@@ -36,9 +37,15 @@ const copy = {
     account: '我的账户', totalCash: '总现金', availableCash: '可用现金', frozenCash: '冻结现金',
     holdings: '总持仓市值', assets: '总资产', realized: '已实现盈亏', unrealized: '未实现盈亏',
     feesPaid: '累计手续费', orderBook: '订单簿 · 五档', trades: '逐笔成交', orders: '我的挂单', positions: '我的持仓',
-    portfolio: '资产历史', strategy: '自动策略', accelerate: '加速推进 ×25', events: '事件时间线', npcs: '交易者统计', selected: '当前标的', last: '最新', change: '涨跌', volume: '成交量', clearCache: '清除缓存',
+    portfolio: '资产历史', strategy: '自动策略', accelerate: '推进', speed: '倍率', events: '事件时间线', npcs: '交易者统计', selected: '当前标的', last: '最新', change: '涨跌', volume: '成交量', clearCache: '清除缓存',
   },
 } as const;
+
+const FAST_FORWARD_RENDER_BATCH_TICKS = 5;
+
+function yieldToBrowser(): Promise<void> {
+  return new Promise((resolve) => window.requestAnimationFrame(() => window.setTimeout(resolve, 0)));
+}
 
 function pct(value: number): string { return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)}%`; }
 function formatMoney(value: number, language: Language): string { return `${value.toLocaleString(locale(language), { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${text(language, 'coins', '酒币')}`; }
@@ -169,7 +176,7 @@ function StrategyPanel({ language, code, onCodeChange, onReset, enabled, setEnab
     <aside className="strategy-side panel">
       <div className="panel-title"><span>{text(language, 'RUNTIME', '运行状态')}</span><small>{MODEL_VERSION}</small></div>
       <div className="strategy-metrics"><div><span>{text(language, 'Mode', '模式')}</span><b>{dryRun ? text(language, 'Dry run', '模拟执行') : text(language, 'Live simulation', '真实模拟')}</b></div><div><span>{text(language, 'Bars run', '执行 Bar 数')}</span><b>{session.runs.length}</b></div><div><span>{text(language, 'Latest', '最近一次')}</span><b>{latest ? `${strategyRunStatusLabel(latest.status, language)} · ${latest.durationMs}ms` : '—'}</b></div><div><span>{text(language, 'Orders', '策略委托')}</span><b>{session.orders.length}</b></div></div>
-      <h4>{text(language, 'Context variables', '可用变量')}</h4><ul className="strategy-vars"><li><code>ctx["tick"]</code> {text(language, 'current auction tick', '当前撮合轮次')}</li><li><code>ctx["assets"]["BDX"]</code> {text(language, 'bars, book, fair value, position and model', 'Bar、订单簿、公允价、持仓与模型')}</li><li><code>ctx["account"]</code> {text(language, 'cash, available/frozen funds and account metrics', '现金、可用/冻结资金与账户指标')}</li><li><code>ctx["open_orders"]</code> {text(language, 'all of your queued and resting orders; use id with cancel(id)', '自己所有待处理和挂簿订单；使用 id 调用 cancel(id)')}</li><li><code>ctx["event"]</code> {text(language, 'latest visible event or None', '最新可见事件或 None')}</li></ul>
+      <h4>{text(language, 'Context variables', '可用变量')}</h4><ul className="strategy-vars"><li><code>ctx["tick"]</code> {text(language, 'current auction tick', '当前撮合轮次')}</li><li><code>ctx["assets"]["BDX"]</code> {text(language, 'bars, live top five, 50-tick order book history, flow, fair value, position and model', 'Bar、当前五档、50 tick 盘口历史、订单流、公允价、持仓与模型')}</li><li><code>ctx["assets"]["BDX"]["orderbook_history"]</code> {text(language, 'last 50 completed tick snapshots with bid/ask prices, volumes and aggressive flow', '最近 50 个完成 tick 的五档价格、挂单量与主动订单流')}</li><li><code>ctx["account"]</code> {text(language, 'cash, available/frozen funds and account metrics', '现金、可用/冻结资金与账户指标')}</li><li><code>ctx["open_orders"]</code> {text(language, 'your orders plus exact FIFO queue-ahead metrics; use id with cancel(id)', '自己的委托及精确 FIFO 前方排队指标；使用 id 调用 cancel(id)')}</li><li><code>ctx["event"]</code> {text(language, 'latest visible event or None', '最新可见事件或 None')}</li></ul>
       <p className="strategy-model">{text(language, 'signal_v1 combines momentum, fair-value gap, top-five imbalance, spread and event signal into an up probability.', 'signal_v1 将动量、公允价偏离、五档失衡、价差与事件信号组合为上涨概率。')}</p>
     </aside>
     <section className="strategy-results panel">
@@ -229,6 +236,8 @@ function App() {
   const [strategyStatus, setStrategyStatus] = useState(text('en', 'Ready', '已就绪'));
   const [, setStrategyVersion] = useState(0);
   const [isAdvancing, setIsAdvancing] = useState(false);
+  const [fastForwardTicks, setFastForwardTicks] = useState<25 | 100 | 250 | 500>(25);
+  const [fastForwardProgress, setFastForwardProgress] = useState<{ completed: number; total: number } | null>(null);
   const clockRef = useRef(performance.now());
   const [frame, setFrame] = useState(performance.now());
   const marketRef = useRef<Market | null>(null);
@@ -322,20 +331,32 @@ function App() {
     }
   };
 
-  const advanceSimulation = async (ticks: number) => {
+  const advanceSimulation = async (ticks: number, showFastForwardProgress = false) => {
     const activeMarket = marketRef.current;
     if (!activeMarket || advancingRef.current || ticks <= 0) return;
     advancingRef.current = true;
     setIsAdvancing(true);
+    if (showFastForwardProgress) setFastForwardProgress({ completed: 0, total: ticks });
     try {
+      if (ticks > 1) await yieldToBrowser();
       for (let count = 0; count < ticks; count += 1) {
         advanceTick(activeMarket);
         if (strategySettingsRef.current.enabled && activeMarket.tick % STRATEGY_BAR_TICKS === 0) await runStrategyBar(activeMarket);
+        if (ticks > 1 && (count + 1) % FAST_FORWARD_RENDER_BATCH_TICKS === 0 && count + 1 < ticks) {
+          if (showFastForwardProgress) setFastForwardProgress({ completed: count + 1, total: ticks });
+          setMarket({ ...activeMarket });
+          await yieldToBrowser();
+        }
       }
       setMarket({ ...activeMarket });
+      if (showFastForwardProgress) {
+        setFastForwardProgress({ completed: ticks, total: ticks });
+        await yieldToBrowser();
+      }
     } finally {
       clockRef.current = performance.now();
       advancingRef.current = false;
+      setFastForwardProgress(null);
       setIsAdvancing(false);
       setFrame(performance.now());
     }
@@ -380,6 +401,7 @@ function App() {
   const visibleNpc = selectedNpc ? market.accounts[selectedNpc] : npcRows[0]?.account;
   const cachedRecordCount = market.trades.length + market.snapshots.length + market.participantSnapshots.length + market.portfolioSnapshots.length + market.events.length
     + Object.keys(market.orders).length + Object.values(market.assets).reduce((total, current) => total + current.priceHistory.length, 0);
+  const fastForwardPercent = fastForwardProgress ? Math.round((fastForwardProgress.completed / fastForwardProgress.total) * 100) : 0;
 
   const choosePrice = (price: number) => { setOrderType('limit'); setSelectedPrice(price); setFeedback(text(language, `Limit price prefilled at ${price.toFixed(1)}. Review quantity before queueing.`, `已填入限价 ${price.toFixed(1)}。提交前请确认数量。`)); };
   const submitOrder = () => {
@@ -404,14 +426,15 @@ function App() {
   const pnlClass = (value: number) => value >= 0 ? 'positive' : 'negative';
 
   return <main className="terminal">
+    {fastForwardProgress && <div className="fast-forward-overlay" role="status" aria-live="polite" aria-label={text(language, `Fast-forwarding ${fastForwardProgress.completed} of ${fastForwardProgress.total} ticks`, `正在快速推进：${fastForwardProgress.completed} / ${fastForwardProgress.total} tick`)}><section className="fast-forward-dialog"><div className="fast-forward-progress-ring" style={{ '--fast-forward-progress': `${fastForwardPercent * 3.6}deg` } as CSSProperties}><div><b>{fastForwardPercent}%</b><span>{fastForwardProgress.completed} / {fastForwardProgress.total}</span></div></div><h2>{text(language, 'Fast-forwarding market', '正在快速推进市场')}</h2><p>{text(language, 'The exchange is advancing in small responsive batches.', '交易所正以小批次推进，浏览器会保持响应。')}</p></section></div>}
     <header className="topbar">
       <div className="wordmark"><div className="brand-mark" role="img" aria-label={text(language, 'Market chart', '行情图表')}>📈</div><div><b>FinPub</b><span>金融酒馆 · {text(language, 'Local Exchange', '本地交易所')}</span></div></div>
       <div className={`status ${running ? 'live' : 'halted'}`}><i />{running ? t.running : t.paused}</div>
-      <div className="top-stat"><span>{text(language, 'SIMULATION TIME', '模拟时间')}</span><b>{new Date(market.simStartMs + market.tick * 1000).toLocaleString(locale(language))}</b></div>
+      <div className="top-stat simulation-time"><span>{text(language, 'SIMULATION TIME', '模拟时间')}</span><b title={new Date(market.simStartMs + market.tick * 1000).toLocaleString(locale(language))}>{new Date(market.simStartMs + market.tick * 1000).toLocaleTimeString(locale(language))}</b></div>
       <div className="top-stat countdown"><span>{t.next}</span><b>{running ? `${(nextMs / 1000).toFixed(2)}s` : text(language, 'Paused', '已暂停')}</b></div>
       <div className="top-stat"><span>{text(language, 'NPCs', '交易者')}</span><b>{market.config.npcCount}</b></div>
       <div className="top-stat"><span>{text(language, 'SEED', '种子')}</span><b>{market.config.seed}</b></div>
-      <div className="top-actions"><button onClick={openWiki}>{text(language, 'Wiki', '知识库')}</button><button onClick={() => setRunning(!running)}>{running ? t.pause : t.resume}</button><button disabled={isAdvancing} onClick={() => void advanceSimulation(25)}>{isAdvancing ? text(language, 'Advancing…', '正在加速…') : t.accelerate}</button><button onClick={() => { const restarted = createMarket(market.config); marketRef.current = restarted; resetStrategySession(restarted); setMarket(restarted); setRunning(true); setFeedback(text(language, 'Market restarted from the locked initialization settings.', '市场已按锁定的初始化参数重新开始。')); }}>{t.restart}</button><button onClick={() => { resetStrategySession(); setDraft(market.config); setMarket(null); }}>{text(language, 'Reconfigure', '重新配置')}</button><button className="danger-action" onClick={clearCache} title={text(language, `${cachedRecordCount.toLocaleString()} in-memory records`, `${cachedRecordCount.toLocaleString(locale(language))} 条内存记录`)}>{t.clearCache}</button><button className="accent" onClick={() => exportMarketData(market, strategySessionRef.current)}>{t.export}</button><select aria-label={text(language, 'Language', '语言')} value={language} onChange={(event) => setLanguage(event.target.value as Language)}><option value="en">{text(language, 'English', '英文')}</option><option value="zh">中文</option></select></div>
+      <div className="top-actions"><button onClick={openWiki}>{text(language, 'Wiki', '知识库')}</button><button onClick={() => setRunning(!running)}>{running ? t.pause : t.resume}</button><div className="speed-control"><label htmlFor="fast-forward-speed">{t.speed}</label><select id="fast-forward-speed" aria-label={text(language, 'Fast-forward speed', '快速推进倍率')} value={fastForwardTicks} disabled={isAdvancing} onChange={(event) => setFastForwardTicks(Number(event.target.value) as 25 | 100 | 250 | 500)}><option value={25}>25×</option><option value={100}>100×</option><option value={250}>250×</option><option value={500}>500×</option></select><button className="fast-forward" disabled={isAdvancing} onClick={() => void advanceSimulation(fastForwardTicks, true)} title={text(language, `Advance ${fastForwardTicks} auction ticks now`, `立即推进 ${fastForwardTicks} 个撮合 tick`)}>{fastForwardProgress ? <i className="speed-spinner" aria-hidden="true" /> : <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 3.75 10.4 10l-6.9 6.25V3.75Z" /><path d="m10 3.75 6.5 6.25L10 16.25V3.75Z" /></svg>}<span aria-live="polite">{fastForwardProgress ? `${fastForwardProgress.completed} / ${fastForwardProgress.total}` : t.accelerate}</span></button></div><button onClick={() => { const restarted = createMarket(market.config); marketRef.current = restarted; resetStrategySession(restarted); setMarket(restarted); setRunning(true); setFeedback(text(language, 'Market restarted from the locked initialization settings.', '市场已按锁定的初始化参数重新开始。')); }}>{t.restart}</button><button onClick={() => { resetStrategySession(); setDraft(market.config); setMarket(null); }}>{text(language, 'Reconfigure', '重新配置')}</button><button className="danger-action" onClick={clearCache} title={text(language, `${cachedRecordCount.toLocaleString()} in-memory records`, `${cachedRecordCount.toLocaleString(locale(language))} 条内存记录`)}>{t.clearCache}</button><button className="accent" onClick={() => exportMarketData(market, strategySessionRef.current)}>{t.export}</button><select aria-label={text(language, 'Language', '语言')} value={language} onChange={(event) => setLanguage(event.target.value as Language)}><option value="en">{text(language, 'English', '英文')}</option><option value="zh">中文</option></select></div>
     </header>
     {market.latestEvent && <section className={`event-banner ${market.latestEvent.direction}`}><span className="event-kicker">{text(language, `LATEST EVENT · T${market.latestEvent.tick}`, `最新事件 · 第 ${market.latestEvent.tick} 轮`)}</span><b>{eventTitle(market.latestEvent.title, language)}</b><span>{market.latestEvent.direction === 'bullish' ? '▲' : '▼'} {text(language, market.latestEvent.direction === 'bullish' ? 'BULLISH' : 'BEARISH', market.latestEvent.direction === 'bullish' ? '利好' : '利空')} · {market.latestEvent.symbols.join(', ')}</span><small>{eventDescription(market.latestEvent.direction, language)}</small></section>}
     <div className="workspace">

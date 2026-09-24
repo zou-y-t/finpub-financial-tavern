@@ -2,6 +2,7 @@ import { INSTRUMENTS, accountMetrics, estimateMarketOrder, getBookLevels, getQuo
 import type { Market, Side } from './types.ts';
 
 export const STRATEGY_BAR_TICKS = 5;
+export const STRATEGY_ORDERBOOK_HISTORY_TICKS = 50;
 export const STRATEGY_MAX_ORDERS_PER_BAR = 3;
 export const STRATEGY_MAX_ACTIONS_PER_BAR = 6;
 export const STRATEGY_MAX_QUANTITY = 25;
@@ -51,6 +52,37 @@ export interface StrategyCancelAllIntent {
 export type StrategyIntent = StrategyOrderIntent | StrategyCancelIntent | StrategyCancelAllIntent;
 export type StrategyAction = StrategyOrderIntent | StrategyCancelIntent;
 
+export interface StrategyBookLevel {
+  level: number;
+  price: number | null;
+  volume: number;
+}
+
+export interface StrategyLiveBookLevel extends StrategyBookLevel {
+  order_count: number;
+  oldest_order_age_ticks: number | null;
+  newest_order_age_ticks: number | null;
+  average_order_age_ticks: number | null;
+}
+
+export interface StrategyOrderBookTick {
+  sim_time: string;
+  tick: number;
+  bids: StrategyBookLevel[];
+  asks: StrategyBookLevel[];
+  aggressive_buy_volume: number;
+  aggressive_sell_volume: number;
+  aggressive_buy_trades: number;
+  aggressive_sell_trades: number;
+}
+
+export interface StrategyOrderFlowWindow {
+  aggressive_buy_volume: number;
+  aggressive_sell_volume: number;
+  aggressive_buy_trades: number;
+  aggressive_sell_trades: number;
+}
+
 export interface StrategyBarSnapshot {
   simTime: string;
   tick: number;
@@ -91,6 +123,13 @@ export interface StrategyBarSnapshot {
   eventSymbols: string;
   eventImpact: number | null;
   eventPermanentShare: number | null;
+  aggressiveBuyVolume5: number;
+  aggressiveSellVolume5: number;
+  aggressiveBuyVolume20: number;
+  aggressiveSellVolume20: number;
+  aggressiveBuyVolume50: number;
+  aggressiveSellVolume50: number;
+  orderbookHistoryJson: string;
   openOrdersJson: string;
 }
 
@@ -154,12 +193,27 @@ export interface StrategyContext {
     submitted_tick: number;
     reserved_cash: number;
     reserved_quantity: number;
+    order_age_ticks: number;
+    queue_ahead_volume: number | null;
+    queue_ahead_order_count: number | null;
+    queue_rank: number | null;
+    level_total_volume: number | null;
+    level_total_order_count: number | null;
   }>;
   event: null | { tick: number; direction: 'bullish' | 'bearish'; symbols: string[]; impact: number; permanent_share: number };
   assets: Record<string, {
     bars: Array<Pick<StrategyBarSnapshot, 'tick' | 'open' | 'high' | 'low' | 'close' | 'volume'>>;
     bar: Pick<StrategyBarSnapshot, 'tick' | 'open' | 'high' | 'low' | 'close' | 'volume'>;
-    book: { best_bid: number | null; best_ask: number | null; mid: number | null; spread: number | null; bid_quantity: number; ask_quantity: number };
+    book: {
+      best_bid: number | null; best_ask: number | null; mid: number | null; spread: number | null; bid_quantity: number; ask_quantity: number;
+      bids: StrategyLiveBookLevel[]; asks: StrategyLiveBookLevel[];
+    };
+    order_flow: {
+      last_5_ticks: StrategyOrderFlowWindow;
+      last_20_ticks: StrategyOrderFlowWindow;
+      last_50_ticks: StrategyOrderFlowWindow;
+    };
+    orderbook_history: StrategyOrderBookTick[];
     fair_value: number;
     position: { quantity: number; available: number; reserved: number; average_cost: number };
     model: { version: string; up_probability: number; expected_return: number; momentum_1: number; momentum_5: number; fair_value_gap: number; book_imbalance: number; spread_bps: number; event_signal: number };
@@ -184,12 +238,106 @@ function eventSignal(market: Market, symbol: string): number {
   return (event.direction === 'bullish' ? 1 : -1) * event.impact * (1 - event.permanentShare);
 }
 
+function emptyBookLevel(level: number): StrategyBookLevel {
+  return { level, price: null, volume: 0 };
+}
+
+function liveBookLevels(market: Market, symbol: string, side: Side, depth = 5): StrategyLiveBookLevel[] {
+  const raw = side === 'buy' ? market.books[symbol].bids : market.books[symbol].asks;
+  const levels: Array<StrategyLiveBookLevel & { totalAge: number }> = [];
+  for (const order of raw) {
+    let current = levels.find((level) => level.price === order.limitPrice);
+    if (!current) {
+      if (levels.length >= depth) continue;
+      current = {
+        level: levels.length + 1, price: order.limitPrice ?? null, volume: 0, order_count: 0,
+        oldest_order_age_ticks: null, newest_order_age_ticks: null, average_order_age_ticks: null, totalAge: 0,
+      };
+      levels.push(current);
+    }
+    const age = Math.max(0, market.tick - order.submittedTick);
+    current.volume += order.remaining;
+    current.order_count += 1;
+    current.totalAge += age;
+    current.oldest_order_age_ticks = Math.max(current.oldest_order_age_ticks ?? age, age);
+    current.newest_order_age_ticks = Math.min(current.newest_order_age_ticks ?? age, age);
+  }
+  return Array.from({ length: depth }, (_, index) => {
+    const current = levels[index];
+    if (!current) return { ...emptyBookLevel(index + 1), order_count: 0, oldest_order_age_ticks: null, newest_order_age_ticks: null, average_order_age_ticks: null };
+    const { totalAge, ...level } = current;
+    return { ...level, average_order_age_ticks: round(totalAge / current.order_count, 3) };
+  });
+}
+
+function buildOrderbookHistory(market: Market): Record<string, StrategyOrderBookTick[]> {
+  const ticks = [...new Set(market.snapshots.map((snapshot) => snapshot.tick))].sort((left, right) => left - right).slice(-STRATEGY_ORDERBOOK_HISTORY_TICKS);
+  const tickSet = new Set(ticks);
+  const history = Object.fromEntries(INSTRUMENTS.map((instrument) => [instrument.symbol, new Map<number, StrategyOrderBookTick>()])) as Record<string, Map<number, StrategyOrderBookTick>>;
+  for (const snapshot of market.snapshots) {
+    if (!tickSet.has(snapshot.tick)) continue;
+    const byTick = history[snapshot.symbol];
+    const current = byTick.get(snapshot.tick) ?? {
+      sim_time: snapshot.simTime, tick: snapshot.tick, bids: [], asks: [],
+      aggressive_buy_volume: 0, aggressive_sell_volume: 0, aggressive_buy_trades: 0, aggressive_sell_trades: 0,
+    };
+    const side = snapshot.side === 'buy' ? current.bids : current.asks;
+    side.push({ level: snapshot.level, price: snapshot.price, volume: snapshot.quantity });
+    byTick.set(snapshot.tick, current);
+  }
+  for (const trade of market.trades) {
+    if (!tickSet.has(trade.tick)) continue;
+    const current = history[trade.symbol].get(trade.tick);
+    if (!current) continue;
+    if (trade.aggressorSide === 'buy') {
+      current.aggressive_buy_volume += trade.quantity;
+      current.aggressive_buy_trades += 1;
+    } else {
+      current.aggressive_sell_volume += trade.quantity;
+      current.aggressive_sell_trades += 1;
+    }
+  }
+  return Object.fromEntries(INSTRUMENTS.map((instrument) => [instrument.symbol, ticks.flatMap((tick) => {
+    const snapshot = history[instrument.symbol].get(tick);
+    if (!snapshot) return [];
+    const normalize = (levels: StrategyBookLevel[]) => Array.from({ length: 5 }, (_, index) => levels.find((level) => level.level === index + 1) ?? emptyBookLevel(index + 1));
+    return [{ ...snapshot, bids: normalize(snapshot.bids), asks: normalize(snapshot.asks) }];
+  })])) as Record<string, StrategyOrderBookTick[]>;
+}
+
+function orderFlow(history: StrategyOrderBookTick[], ticks: number): StrategyOrderFlowWindow {
+  return history.slice(-ticks).reduce<StrategyOrderFlowWindow>((total, snapshot) => ({
+    aggressive_buy_volume: total.aggressive_buy_volume + snapshot.aggressive_buy_volume,
+    aggressive_sell_volume: total.aggressive_sell_volume + snapshot.aggressive_sell_volume,
+    aggressive_buy_trades: total.aggressive_buy_trades + snapshot.aggressive_buy_trades,
+    aggressive_sell_trades: total.aggressive_sell_trades + snapshot.aggressive_sell_trades,
+  }), { aggressive_buy_volume: 0, aggressive_sell_volume: 0, aggressive_buy_trades: 0, aggressive_sell_trades: 0 });
+}
+
+function queueMetrics(market: Market, order: Market['orders'][string]) {
+  const unavailable = { queue_ahead_volume: null, queue_ahead_order_count: null, queue_rank: null, level_total_volume: null, level_total_order_count: null };
+  if (order.type !== 'limit' || !['open', 'partial'].includes(order.status) || order.limitPrice === undefined) return unavailable;
+  const raw = order.side === 'buy' ? market.books[order.symbol].bids : market.books[order.symbol].asks;
+  const samePrice = raw.filter((candidate) => candidate.limitPrice === order.limitPrice);
+  const index = samePrice.findIndex((candidate) => candidate.id === order.id);
+  if (index < 0) return unavailable;
+  const ahead = samePrice.slice(0, index);
+  return {
+    queue_ahead_volume: ahead.reduce((total, candidate) => total + candidate.remaining, 0),
+    queue_ahead_order_count: ahead.length,
+    queue_rank: index + 1,
+    level_total_volume: samePrice.reduce((total, candidate) => total + candidate.remaining, 0),
+    level_total_order_count: samePrice.length,
+  };
+}
+
 export function buildStrategyContext(market: Market, session: StrategySession): StrategyContext {
   const player = market.accounts.player;
   const metrics = accountMetrics(market, player);
   const barIndex = Math.floor(market.tick / STRATEGY_BAR_TICKS);
   const assets: StrategyContext['assets'] = {};
   const event = market.latestEvent;
+  const orderbookHistory = buildOrderbookHistory(market);
   const openOrders = Object.values(market.orders)
     .filter((order) => order.participantId === 'player' && ['queued', 'open', 'partial', 'pending_cancel'].includes(order.status))
     .sort((left, right) => left.sequence - right.sequence)
@@ -197,6 +345,7 @@ export function buildStrategyContext(market: Market, session: StrategySession): 
       id: order.id, symbol: order.symbol, side: order.side, type: order.type, price: order.limitPrice ?? null,
       quantity: order.quantity, remaining: order.remaining, status: order.status as 'queued' | 'open' | 'partial' | 'pending_cancel',
       submitted_tick: order.submittedTick, reserved_cash: order.reservedCash, reserved_quantity: order.reservedQuantity,
+      order_age_ticks: Math.max(0, market.tick - order.submittedTick), ...queueMetrics(market, order),
     }));
 
   for (const instrument of INSTRUMENTS) {
@@ -208,6 +357,12 @@ export function buildStrategyContext(market: Market, session: StrategySession): 
     const fiveBack = asset.priceHistory.filter((point) => point.tick <= market.tick - STRATEGY_BAR_TICKS).at(-1)?.price ?? asset.previousClose;
     const bidLevels = getBookLevels(market, symbol, 'buy');
     const askLevels = getBookLevels(market, symbol, 'sell');
+    const liveBids = liveBookLevels(market, symbol, 'buy');
+    const liveAsks = liveBookLevels(market, symbol, 'sell');
+    const instrumentOrderbookHistory = orderbookHistory[symbol];
+    const flow5 = orderFlow(instrumentOrderbookHistory, 5);
+    const flow20 = orderFlow(instrumentOrderbookHistory, 20);
+    const flow50 = orderFlow(instrumentOrderbookHistory, 50);
     const quote = getQuotes(market, symbol);
     const bidQuantity = bidLevels.reduce((total, level) => total + level.quantity, 0);
     const askQuantity = askLevels.reduce((total, level) => total + level.quantity, 0);
@@ -232,6 +387,10 @@ export function buildStrategyContext(market: Market, session: StrategySession): 
       accountTotalAsset: metrics.totalAsset, accountPositionValue: metrics.positionValue, accountUnrealizedPnl: metrics.unrealized,
       eventTick: event?.tick ?? null, eventDirection: event?.direction ?? null, eventSymbols: event?.symbols.join('|') ?? '',
       eventImpact: event?.impact ?? null, eventPermanentShare: event?.permanentShare ?? null,
+      aggressiveBuyVolume5: flow5.aggressive_buy_volume, aggressiveSellVolume5: flow5.aggressive_sell_volume,
+      aggressiveBuyVolume20: flow20.aggressive_buy_volume, aggressiveSellVolume20: flow20.aggressive_sell_volume,
+      aggressiveBuyVolume50: flow50.aggressive_buy_volume, aggressiveSellVolume50: flow50.aggressive_sell_volume,
+      orderbookHistoryJson: JSON.stringify(instrumentOrderbookHistory),
       openOrdersJson: JSON.stringify(openOrders),
     };
     session.lastVolume[symbol] = asset.volume;
@@ -240,7 +399,9 @@ export function buildStrategyContext(market: Market, session: StrategySession): 
     assets[symbol] = {
       bars: priorBars,
       bar: { tick: snapshot.tick, open: snapshot.open, high: snapshot.high, low: snapshot.low, close: snapshot.close, volume: snapshot.volume },
-      book: { best_bid: quote.bestBid, best_ask: quote.bestAsk, mid: quote.mid, spread: quote.spread, bid_quantity: bidQuantity, ask_quantity: askQuantity },
+      book: { best_bid: quote.bestBid, best_ask: quote.bestAsk, mid: quote.mid, spread: quote.spread, bid_quantity: bidQuantity, ask_quantity: askQuantity, bids: liveBids, asks: liveAsks },
+      order_flow: { last_5_ticks: flow5, last_20_ticks: flow20, last_50_ticks: flow50 },
+      orderbook_history: instrumentOrderbookHistory,
       fair_value: asset.fairValue,
       position: { quantity: position.quantity, available: position.quantity - position.reserved, reserved: position.reserved, average_cost: position.averageCost },
       model: { version: MODEL_VERSION, up_probability: upProbability, expected_return: expectedReturn, momentum_1: momentum1, momentum_5: momentum5, fair_value_gap: fairValueGap, book_imbalance: imbalance, spread_bps: spreadBps, event_signal: newsSignal },

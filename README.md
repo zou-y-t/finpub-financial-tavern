@@ -151,15 +151,19 @@ cancel_all(symbol=None, side=None)
 | `ctx["account"]["cash"]` | 玩家总现金。 |
 | `ctx["account"]["available_cash"]` / `frozen_cash` | 可用于新买单的现金 / 已为挂单冻结的现金。 |
 | `ctx["account"]["total_asset"]` / `position_value` / `unrealized_pnl` | 总资产、持仓市值、未实现盈亏。 |
-| `ctx["open_orders"]` | 玩家当前所有 `queued`、`open`、`partial`、`pending_cancel` 订单；每条含 `id`、`symbol`、`side`、`type`、`price`、`quantity`、`remaining`、`status`、`submitted_tick`、`reserved_cash`、`reserved_quantity`。可用 `id` 调用 `cancel(id)`，也可据此避免重复挂单。 |
+| `ctx["open_orders"]` | 玩家当前所有 `queued`、`open`、`partial`、`pending_cancel` 订单；每条含原有订单字段，以及 `order_age_ticks`。对于已在簿内的 `open`/`partial` 限价单，还精确提供 `queue_ahead_volume`、`queue_ahead_order_count`、`queue_rank`、`level_total_volume`、`level_total_order_count`；其他状态的 FIFO 字段为 `None`。可用 `id` 调用 `cancel(id)`。 |
 | `ctx["event"]` | 最新事件；无事件为 `None`。事件对象含 `tick`、`direction`、`symbols`、`impact`、`permanent_share`。 |
-| `ctx["assets"]["BDX"]["bars"]` | 最近最多 60 根策略 Bar；每根含 `tick`、`open`、`high`、`low`、`close`、`volume`。 |
-| `ctx["assets"]["BDX"]["book"]` | 当前五档汇总：`best_bid`、`best_ask`、`mid`、`spread`、`bid_quantity`、`ask_quantity`。 |
+| `ctx["assets"]["BDX"]["bars"]` | 最近最多 60 根策略 Bar；每根含 `tick`、`open`、`high`、`low`、`close`、`volume`。这是低频 OHLCV 序列，不是盘口历史。 |
+| `ctx["assets"]["BDX"]["book"]` | 当前完整五档：除 `best_bid`、`best_ask`、`mid`、`spread`、`bid_quantity`、`ask_quantity` 外，含按最优到最差排序的 `bids`/`asks`。每档含 `level`、`price`、`volume`、`order_count`、`oldest_order_age_ticks`、`newest_order_age_ticks`、`average_order_age_ticks`。`volume` 是未成交挂单量，不是已成交量。 |
+| `ctx["assets"]["BDX"]["orderbook_history"]` | 最近最多 **50 个已完成 tick** 的五档订单簿序列，包含当前 tick 和此前最多 49 个 tick。每项含 `tick`、`sim_time`、五档 `bids`/`asks`（每档 `level`、`price`、`volume`）及本 tick 的 `aggressive_buy_volume`、`aggressive_sell_volume`、`aggressive_buy_trades`、`aggressive_sell_trades`。盘口快照取自该 tick 全部撮合完成后的状态。 |
+| `ctx["assets"]["BDX"]["order_flow"]` | 根据 `orderbook_history` 精确汇总的 `last_5_ticks`、`last_20_ticks`、`last_50_ticks` 主动买卖成交量和成交笔数。策略也可直接从逐 tick 历史计算任意不超过 50 的窗口。 |
 | `ctx["assets"]["BDX"]["fair_value"]` | 当前公允价值，不等于最新成交价。 |
 | `ctx["assets"]["BDX"]["position"]` | 本标的的 `quantity`、`available`、`reserved`、`average_cost`。 |
 | `ctx["assets"]["BDX"]["model"]` | 内置 `signal_v1` 的 `up_probability`、`expected_return`、`momentum_1`、`momentum_5`、`fair_value_gap`、`book_imbalance`、`spread_bps`、`event_signal`。 |
 
 `signal_v1` 不是外部价格预测服务，而是一个可复现的小型确定性特征模型：它将 1/5 Bar 动量、公允价值偏离、五档量差、价差和最近事件信号组合为预期收益与上涨概率。它只供策略读取；不直接修改成交价或替玩家下单。
+
+当前没有把“最近 N tick 撤单量”作为精确策略字段：订单模型尚未记录撤单发生 tick、撤单剩余量与撤单原因，不能从盘口变化中可靠地区分撤单和成交。该能力需要独立的订单生命周期事件流。
 
 ### 加速与 Python 回放包
 
@@ -181,7 +185,7 @@ cancel_all(symbol=None, side=None)
 | `trades.csv` | 每笔成交、买卖双方、maker/taker、费用、成交额、现金变化 |
 | `orderbook_1s.csv` | 每轮订单簿五档与报价指标 |
 | `participant_pnl_1s.csv` | 每轮玩家和 NPC 的账户、持仓市值、盈亏、费用与成交统计 |
-| `strategy_bars.csv` | 每个策略 Bar 的 OHLCV、五档摘要、公允价值、模型特征/输出、账户、持仓、事件与当时 `open_orders` JSON |
+| `strategy_bars.csv` | 每个策略 Bar 的 OHLCV、五档摘要、公允价值、模型特征/输出、账户、持仓、事件、5/20/50 tick 主动订单流、当时 `open_orders` JSON，以及策略当时看到的 50 tick `orderbook_history_json` |
 | `strategy_runs.csv` | 每次 `on_bar` 的 tick、状态、耗时、输出和错误信息 |
 | `strategy_orders.csv` | 策略下单与撤单操作的 dry run / queued / cancel_requested / rejected 结果、订单类型、价格、数量、订单 ID 和原因 |
 
